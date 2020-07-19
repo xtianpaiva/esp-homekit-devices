@@ -178,20 +178,24 @@ static int compact_data() {
         return 0;
     }
 
-    if (homekit_storage_reset()) {
+    if (homekit_storage_reset() != 0) {
         ERROR("Failed to compact data: error resetting flash");
+        free(data);
         return -1;
     }
     if (homekit_storage_init() < 0) {
         ERROR("Failed to compact data: error initializing flash");
+        free(data);
         return -1;
     }
 
     if (!spiflash_write(SPIFLASH_BASE_ADDR, data, PAIRINGS_OFFSET + sizeof(pairing_data_t)*next_pairing_idx)) {
         ERROR("Failed to compact data: error writing compacted data");
+        free(data);
         return -1;
     }
 
+    free(data);
     return 0;
 }
 
@@ -269,16 +273,20 @@ int homekit_storage_update_pairing(const char *device_id, byte permissions) {
                 return -2;
             }
 
-            r = homekit_storage_add_pairing(data.device_id, device_key, permissions);
-            crypto_ed25519_free(device_key);
-            if (r) {
-                return -2;
-            }
+            if (memcmp(device_key, data.device_public_key, sizeof(data.device_public_key)) != 0) {
+                r = homekit_storage_add_pairing(data.device_id, device_key, permissions);
+                crypto_ed25519_free(device_key);
+                if (r) {
+                    return -2;
+                }
 
-            memset(&data, 0, sizeof(data));
-            if (!spiflash_write(PAIRINGS_ADDR + sizeof(data)*i, (byte *)&data, sizeof(data))) {
-                ERROR("Failed to update pairing: error erasing old record");
-                return -2;
+                memset(&data, 0, sizeof(data));
+                if (!spiflash_write(PAIRINGS_ADDR + sizeof(data)*i, (byte *)&data, sizeof(data))) {
+                    ERROR("Failed to update pairing: error erasing old record");
+                    return -2;
+                }
+            } else {
+                INFO("Device Public Key not needing updated");
             }
 
             return 0;

@@ -18,7 +18,7 @@
 
 /* The default maximum reply size, increase as necessary. */
 #ifndef MDNS_RESPONDER_REPLY_SIZE
-#define MDNS_RESPONDER_REPLY_SIZE      1460
+#define MDNS_RESPONDER_REPLY_SIZE       1460
 #endif
 
 // Starts the mDNS responder task, call first
@@ -36,6 +36,8 @@ typedef enum {
 
 // Clear all records
 void mdns_clear();
+
+void mdns_announce();
 
 void mdns_add_facility( const char* instanceName,   // Short user-friendly instance name, should NOT include serial number/MAC/etc
                         const char* serviceName,    // Must be registered, _name, (see RFC6335 5.1 & 5.2)

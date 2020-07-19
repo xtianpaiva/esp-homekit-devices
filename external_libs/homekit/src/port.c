@@ -8,28 +8,12 @@
 #include <esplibs/libmain.h>
 #include "mdnsresponder.h"
 
-#ifndef MDNS_TTL
-#define MDNS_TTL 4500
-#endif
-
 uint32_t homekit_random() {
     return hwrand();
 }
 
 void homekit_random_fill(uint8_t *data, size_t size) {
     hwrand_fill(data, size);
-}
-
-void homekit_system_restart() {
-    sdk_system_restart();
-}
-
-void homekit_overclock_start() {
-    sdk_system_overclock();
-}
-
-void homekit_overclock_end() {
-    sdk_system_restoreclock();
 }
 
 static char mdns_instance_name[65] = {0};
@@ -64,12 +48,16 @@ void homekit_mdns_add_txt(const char *key, const char *format, ...) {
     }
 }
 
-void homekit_mdns_configure_finalize() {
+void homekit_mdns_configure_finalize(const uint16_t mdns_ttl) {
     mdns_clear();
-    mdns_add_facility(mdns_instance_name, "_hap", mdns_txt_rec, mdns_TCP, mdns_port, MDNS_TTL);
+    mdns_add_facility(mdns_instance_name, "_hap", mdns_txt_rec, mdns_TCP, mdns_port, mdns_ttl);
 
-    printf("mDNS announcement: Name=%s %s Port=%d TTL=%d\n",
-           mdns_instance_name, mdns_txt_rec, mdns_port, MDNS_TTL);
+    printf("mDNS announcement: Name=%s %s Port=%d TTL=%d\n", mdns_instance_name, mdns_txt_rec, mdns_port, mdns_ttl);
+}
+
+
+void homekit_port_mdns_announce() {
+    mdns_announce();
 }
 
 #endif
@@ -126,7 +114,7 @@ void homekit_mdns_add_txt(const char *key, const char *format, ...) {
     }
 }
 
-void homekit_mdns_configure_finalize() {
+void homekit_mdns_configure_finalize(const uint16_t mdns_ttl) {
     /*
     printf("mDNS announcement: Name=%s %s Port=%d TTL=%d\n",
            name->value.string_value, txt_rec, PORT, 0);

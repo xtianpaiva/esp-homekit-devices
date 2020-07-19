@@ -131,6 +131,9 @@ static const ip_addr_t gMulticastV6Addr = DNS_MQUERY_IPV6_GROUP_INIT;
 static SemaphoreHandle_t gDictMutex = NULL;
 static mdns_rsrc*      gDictP = NULL;       // RR database, linked list
 
+static u8_t mdns_response[MDNS_RESPONDER_REPLY_SIZE];
+static u8_t mdns_payload[MDNS_RESPONDER_REPLY_SIZE];
+
 //---------------------- Debug/logging utilities -------------------------
 
     // DNS field TYPE used for "Resource Records", some additions
@@ -427,8 +430,9 @@ static ETSTimer mdns_announce_timer;
 void mdns_clear() {
     sdk_os_timer_disarm(&mdns_announce_timer);
     
-    xSemaphoreTake(gDictMutex, portMAX_DELAY);
-
+    if (!xSemaphoreTake(gDictMutex, portMAX_DELAY))
+        return;
+    
     mdns_rsrc *rsrc = gDictP;
     gDictP = NULL;
 
@@ -485,10 +489,11 @@ static void mdns_add_response(const char* vKey, u16_t vType, u32_t ttl, const vo
         memcpy(rsrcP->rData, vKey, keyLen);
         memcpy(&rsrcP->rData[keyLen], dataP, vDataSize);
 
-        xSemaphoreTake(gDictMutex, portMAX_DELAY);
-        rsrcP->rNext = gDictP;
-        gDictP = rsrcP;
-        xSemaphoreGive(gDictMutex);
+        if (xSemaphoreTake(gDictMutex, portMAX_DELAY)) {
+            rsrcP->rNext = gDictP;
+            gDictP = rsrcP;
+            xSemaphoreGive(gDictMutex);
+        }
 
 #ifdef qDebugLog
         printf("mDNS added RR '%s' %s, %d bytes\n", vKey, mdns_qrtype(vType), vDataSize);
@@ -547,19 +552,27 @@ void mdns_announce() {
     struct netif *netif = sdk_system_get_netif(STATION_IF);
 #if LWIP_IPV4
     mdns_announce_netif(netif, &gMulticastV4Addr);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    mdns_announce_netif(netif, &gMulticastV4Addr);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    mdns_announce_netif(netif, &gMulticastV4Addr);
 #endif
 #if LWIP_IPV6
     mdns_announce_netif(netif, &gMulticastV6Addr);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    mdns_announce_netif(netif, &gMulticastV4Addr);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    mdns_announce_netif(netif, &gMulticastV4Addr);
 #endif
 }
 
-void mdns_add_facility( const char* instanceName,   // Friendly name, need not be unique
-                        const char* serviceName,    // Must be "_name", e.g. "_hap" or "_http"
-                        const char* addText,        // Must be <key>=<value>
-                        mdns_flags flags,           // TCP or UDP
-                        u16_t onPort,               // port number
-                        u32_t ttl                   // seconds
-                      )
+void mdns_add_facility_work(const char* instanceName,   // Friendly name, need not be unique
+                            const char* serviceName,    // Must be "_name", e.g. "_hap" or "_http"
+                            const char* addText,        // Must be <key>=<value>
+                            mdns_flags flags,           // TCP or UDP
+                            u16_t onPort,               // port number
+                            u32_t ttl                   // seconds
+                           )
 {
     size_t key_len = strlen(serviceName) + 12;
     char *key = malloc(key_len + 1);
@@ -606,11 +619,36 @@ void mdns_add_facility( const char* instanceName,   // Friendly name, need not b
     free(devName);
 
     sdk_os_timer_disarm(&mdns_announce_timer);
-
+    
     mdns_announce();
+    
+    if (ttl > 0) {
+        sdk_os_timer_setfn(&mdns_announce_timer, mdns_announce, NULL);
+        sdk_os_timer_arm(&mdns_announce_timer, ttl * 1000, 1);
+    }
+}
 
-    sdk_os_timer_setfn(&mdns_announce_timer, mdns_announce, NULL);
-    sdk_os_timer_arm(&mdns_announce_timer, ttl * 1000, 1);
+void mdns_add_facility(const char* instanceName,   // Friendly name, need not be unique
+                       const char* serviceName,    // Must be "_name", e.g. "_hap" or "_http"
+                       const char* addText,        // Must be <key>=<value>
+                       mdns_flags flags,           // TCP or UDP
+                       u16_t onPort,               // port number
+                       u32_t ttl                   // seconds
+                      )
+{
+    while (sdk_wifi_station_get_connect_status() != STATION_GOT_IP) {
+        vTaskDelayMs(200);
+    }
+    
+    vTaskDelayMs(600);
+    
+    if (strstr(addText, "sf=1") != NULL) {
+        mdns_add_facility_work(instanceName, serviceName, addText, flags, onPort, 0);
+        vTaskDelayMs(2000);
+        mdns_clear();
+    }
+    
+    mdns_add_facility_work(instanceName, serviceName, addText, flags, onPort, ttl);
 }
 
 static mdns_rsrc* mdns_match(const char* qstr, u16_t qType)
@@ -709,13 +747,8 @@ static void mdns_reply(const ip_addr_t *addr, struct mdns_hdr* hdrP)
     mdns_rsrc* extra;
     u8_t* qBase = (u8_t*)hdrP;
     u8_t* qp;
-    u8_t* mdns_response;
-
-    mdns_response = malloc(MDNS_RESPONDER_REPLY_SIZE);
-    if (mdns_response == NULL) {
-        printf(">>> mdns_reply could not alloc %d\n", MDNS_RESPONDER_REPLY_SIZE);
-        return;
-    }
+    
+    memset(mdns_response, 0, MDNS_RESPONDER_REPLY_SIZE);
 
     // Build response header
     rHdr = (struct mdns_hdr*) mdns_response;
@@ -819,18 +852,12 @@ static void mdns_reply(const ip_addr_t *addr, struct mdns_hdr* hdrP)
         }
         mdns_send_mcast(addr, mdns_response, respLen);
     }
-
-    free(mdns_response);
 }
 
 // Announce all configured services
 static void mdns_announce_netif(struct netif *netif, const ip_addr_t *addr)
 {
-    u8_t *mdns_response = malloc(MDNS_RESPONDER_REPLY_SIZE);
-    if (mdns_response == NULL) {
-        printf(">>> mdns_reply could not alloc %d\n", MDNS_RESPONDER_REPLY_SIZE);
-        return;
-    }
+    memset(mdns_response, 0, MDNS_RESPONDER_REPLY_SIZE);
 
     // Build response header
     struct mdns_hdr *rHdr = (struct mdns_hdr*) mdns_response;
@@ -889,8 +916,6 @@ static void mdns_announce_netif(struct netif *netif, const ip_addr_t *addr)
     if (respLen > SIZEOF_DNS_HDR) {
         mdns_send_mcast(addr, mdns_response, respLen);
     }
-
-    free(mdns_response);
 }
 
 // Callback from udp_recv
@@ -899,7 +924,6 @@ static void mdns_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_a
     UNUSED_ARG(pcb);
     UNUSED_ARG(port);
 
-    u8_t* mdns_payload;
     int   plen;
 
     plen = p->tot_len;
@@ -915,22 +939,18 @@ static void mdns_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_a
     } else if (plen < (SIZEOF_DNS_HDR + SIZEOF_DNS_QUERY + 1 + SIZEOF_DNS_ANSWER + 1)) {
         printf(">>> mdns_recv: pbuf too small\n");
     } else {
-        mdns_payload = malloc(plen);
-        if (!mdns_payload) {
-            printf(">>> mdns_recv, could not alloc %d\n",plen);
-        } else {
-            if (pbuf_copy_partial(p, mdns_payload, plen, 0) == plen) {
-                struct mdns_hdr* hdrP = (struct mdns_hdr*) mdns_payload;
+        memset(mdns_payload, 0, MDNS_RESPONDER_REPLY_SIZE);
+        
+        if (pbuf_copy_partial(p, mdns_payload, plen, 0) == plen) {
+            struct mdns_hdr* hdrP = (struct mdns_hdr*) mdns_payload;
 #ifdef qLogAllTraffic
-                mdns_print_msg(mdns_payload, plen);
+            mdns_print_msg(mdns_payload, plen);
 #endif
-
-                if ( (hdrP->flags1 & (DNS_FLAG1_RESP + DNS_FLAG1_OPMASK + DNS_FLAG1_TRUNC) ) == 0
-                     && hdrP->numquestions > 0 )
-                    mdns_reply(addr, hdrP);
-            }
-            free(mdns_payload);
+            if ( (hdrP->flags1 & (DNS_FLAG1_RESP + DNS_FLAG1_OPMASK + DNS_FLAG1_TRUNC) ) == 0
+                 && hdrP->numquestions > 0 )
+                mdns_reply(addr, hdrP);
         }
+
     }
     pbuf_free(p);
 }
@@ -946,12 +966,15 @@ void mdns_init()
         return;
     }
 
+    LOCK_TCPIP_CORE();
+    
     // Start IGMP on the netif for our interface: this isn't done for us
     if (!(netif->flags & NETIF_FLAG_IGMP)) {
         netif->flags |= NETIF_FLAG_IGMP;
         err = igmp_start(netif);
         if (err != ERR_OK) {
             printf(">>> mDNS_init: igmp_start on %c%c failed %d\n", netif->name[0], netif->name[1],err);
+            UNLOCK_TCPIP_CORE();
             return;
         }
     }
@@ -959,34 +982,41 @@ void mdns_init()
     gDictMutex = xSemaphoreCreateBinary();
     if (!gDictMutex) {
         printf(">>> mDNS_init: failed to initialize mutex\n");
+        UNLOCK_TCPIP_CORE();
         return;
     }
     xSemaphoreGive(gDictMutex);
-
+    
     gMDNS_pcb = udp_new_ip_type(IPADDR_TYPE_ANY);
     if (!gMDNS_pcb) {
         printf(">>> mDNS_init: udp_new failed\n");
+        UNLOCK_TCPIP_CORE();
         return;
     }
 
     if ((err = igmp_joingroup_netif(netif, ip_2_ip4(&gMulticastV4Addr))) != ERR_OK) {
         printf(">>> mDNS_init: igmp_join failed %d\n",err);
+        UNLOCK_TCPIP_CORE();
         return;
     }
 
 #if LWIP_IPV6
     if ((err = mld6_joingroup_netif(netif, ip_2_ip6(&gMulticastV6Addr))) != ERR_OK) {
         printf(">>> mDNS_init: igmp_join failed %d\n",err);
+        UNLOCK_TCPIP_CORE();
         return;
     }
 #endif
 
     if ((err = udp_bind(gMDNS_pcb, IP_ANY_TYPE, LWIP_IANA_PORT_MDNS)) != ERR_OK) {
         printf(">>> mDNS_init: udp_bind failed %d\n",err);
+        UNLOCK_TCPIP_CORE();
         return;
     }
 
     udp_bind_netif(gMDNS_pcb, netif);
 
     udp_recv(gMDNS_pcb, mdns_recv, NULL);
+    
+    UNLOCK_TCPIP_CORE();
 }
